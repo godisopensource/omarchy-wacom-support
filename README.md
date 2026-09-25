@@ -1,5 +1,7 @@
 # Wacom Support for Omarchy
 
+![Wacom Support panel preview](preview.png)
+
 Map your Wacom tablet's pad buttons to anything — workspace switches, app
 launchers, screenshots, custom commands — everywhere *outside* the apps that
 already handle them natively (like Rnote).

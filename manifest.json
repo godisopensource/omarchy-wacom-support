@@ -6,6 +6,7 @@
   "author": "godisopensource",
   "license": "MIT",
   "description": "Map Wacom tablet pad buttons to any action (workspaces, apps, commands). The bar widget hides itself when no tablet is connected.",
+  "preview": "preview.png",
   "kinds": [
     "bar-widget"
   ],

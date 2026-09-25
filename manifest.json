@@ -1,0 +1,89 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.godisopensource.omarchy-wacom-support",
+  "name": "Wacom Support",
+  "version": "0.1.0",
+  "author": "godisopensource",
+  "license": "MIT",
+  "description": "Map Wacom tablet pad buttons to any action (workspaces, apps, commands). The bar widget hides itself when no tablet is connected.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Wacom",
+    "description": "Wacom tablet pad-button mapper",
+    "category": "Hardware",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "autoStart": true,
+      "label1": "Workspace 1",
+      "button1": "hyprctl dispatch 'hl.dsp.focus({ workspace = \"1\" })'",
+      "label2": "Workspace 2",
+      "button2": "hyprctl dispatch 'hl.dsp.focus({ workspace = \"2\" })'",
+      "label3": "Workspace 3",
+      "button3": "hyprctl dispatch 'hl.dsp.focus({ workspace = \"3\" })'",
+      "label4": "Workspace 4",
+      "button4": "hyprctl dispatch 'hl.dsp.focus({ workspace = \"4\" })'"
+    },
+    "schema": [
+      {
+        "key": "autoStart",
+        "type": "boolean",
+        "label": "Start button daemon when a tablet is detected",
+        "defaultValue": true
+      },
+      {
+        "key": "label1",
+        "type": "string",
+        "label": "Button 1 label",
+        "defaultValue": "Workspace 1"
+      },
+      {
+        "key": "button1",
+        "type": "string",
+        "label": "Button 1 command",
+        "defaultValue": "hyprctl dispatch 'hl.dsp.focus({ workspace = \"1\" })'"
+      },
+      {
+        "key": "label2",
+        "type": "string",
+        "label": "Button 2 label",
+        "defaultValue": "Workspace 2"
+      },
+      {
+        "key": "button2",
+        "type": "string",
+        "label": "Button 2 command",
+        "defaultValue": "hyprctl dispatch 'hl.dsp.focus({ workspace = \"2\" })'"
+      },
+      {
+        "key": "label3",
+        "type": "string",
+        "label": "Button 3 label",
+        "defaultValue": "Workspace 3"
+      },
+      {
+        "key": "button3",
+        "type": "string",
+        "label": "Button 3 command",
+        "defaultValue": "hyprctl dispatch 'hl.dsp.focus({ workspace = \"3\" })'"
+      },
+      {
+        "key": "label4",
+        "type": "string",
+        "label": "Button 4 label",
+        "defaultValue": "Workspace 4"
+      },
+      {
+        "key": "button4",
+        "type": "string",
+        "label": "Button 4 command",
+        "defaultValue": "hyprctl dispatch 'hl.dsp.focus({ workspace = \"4\" })'"
+      }
+    ]
+  }
+}

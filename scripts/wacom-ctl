@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+# CLI for the Wacom Support plugin daemon.
+#   wacom-ctl status [--json] | start | stop | restart | probe | test N | logs | config
+set -u
+
+PLUGIN_ID="io.github.godisopensource.omarchy-wacom-support"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DAEMON="$SCRIPT_DIR/wacom-daemon.py"
+STATUS="$SCRIPT_DIR/wacom-status"
+RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}"
+PID_FILE="$RUNTIME_DIR/omarchy-wacom-support.pid"
+
+die() { echo "wacom-ctl: $*" >&2; exit 1; }
+
+daemon_pid() {
+  if [[ -f "$PID_FILE" ]]; then
+    local pid
+    pid="$(cat "$PID_FILE" 2>/dev/null || echo "")"
+    if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+      printf '%s' "$pid"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+cmd_status() {
+  if [[ "${1:-}" == "--json" ]]; then
+    exec "$STATUS" --json
+  fi
+  local info name node present daemon pid
+  info="$("$STATUS" --json)"
+  echo "$info" | python3 -c "
+import json,sys
+d = json.load(sys.stdin)
+print('tablet : ' + (d.get('name') or '(none)') + (' ' + d['node'] if d.get('node') else ''))
+print('present: ' + str(d.get('present')))
+print('daemon : ' + ('running (pid %s)' % d.get('pid') if d.get('daemon') else 'stopped'))
+"
+  echo "--- mapping ---"
+  python3 "$DAEMON" --check-config
+}
+
+cmd_start() {
+  if daemon_pid >/dev/null; then
+    echo "daemon already running (pid $(daemon_pid))"
+    return 0
+  fi
+  [[ -x "$DAEMON" ]] || chmod +x "$DAEMON" 2>/dev/null || true
+  # setsid + nohup so it survives the launching shell/widget process.
+  setsid nohup python3 "$DAEMON" >/dev/null 2>&1 < /dev/null &
+  disown 2>/dev/null || true
+  for _ in $(seq 1 20); do
+    sleep 0.15
+    if daemon_pid >/dev/null; then
+      echo "daemon started (pid $(daemon_pid))"
+      return 0
+    fi
+  done
+  die "daemon did not start; see ${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-wacom-support/daemon.log"
+}
+
+cmd_stop() {
+  local pid
+  if ! pid="$(daemon_pid)"; then
+    rm -f "$PID_FILE"
+    echo "daemon not running"
+    return 0
+  fi
+  kill "$pid" 2>/dev/null || true
+  for _ in $(seq 1 20); do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.15
+  done
+  rm -f "$PID_FILE"
+  echo "daemon stopped"
+}
+
+cmd_probe() {
+  exec python3 "$DAEMON" --probe
+}
+
+cmd_test() {
+  local n="${1:-}"
+  [[ "$n" =~ ^[1-4]$ ]] || die "usage: wacom-ctl test N   (N = 1..4)"
+  local cmd
+  cmd="$(python3 "$DAEMON" --check-config | sed -n "s/^button $n \[.*\]: //p" | sed 's/  \[translated from legacy syntax\]$//')"
+  if [[ -z "$cmd" || "$cmd" == "(unmapped)" ]]; then
+    die "button $n is unmapped"
+  fi
+  echo "running button $n: $cmd"
+  sh -c "$cmd" &
+  disown 2>/dev/null || true
+}
+
+cmd_logs() {
+  local log="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-wacom-support/daemon.log"
+  if [[ -f "$log" ]]; then
+    tail -n "${1:-50}" "$log"
+  else
+    echo "no log yet ($log)"
+  fi
+}
+
+cmd_config() {
+  python3 "$DAEMON" --check-config
+}
+
+cmd_save_override() {
+  local json="${1:-}"
+  [[ -n "$json" ]] || die "usage: wacom-ctl save-override '<json>'"
+  local dir="$HOME/.config/omarchy-wacom-support"
+  mkdir -p "$dir"
+  python3 - "$dir/buttons.json" "$json" <<'EOF'
+import json, sys
+path, raw = sys.argv[1], sys.argv[2]
+try:
+    data = json.loads(raw)
+except ValueError as exc:
+    print("invalid JSON: %s" % exc, file=sys.stderr)
+    sys.exit(1)
+if not isinstance(data, dict):
+    print("JSON must be an object", file=sys.stderr)
+    sys.exit(1)
+kept = {k: str(v) for k, v in data.items()
+        if k.startswith("label") or k.startswith("button") or k == "autoStart"}
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(kept, fh, indent=2, sort_keys=True)
+    fh.write("\n")
+print("wrote %s" % path)
+EOF
+}
+
+case "${1:-status}" in
+  status) shift; cmd_status "$@" ;;
+  start) cmd_start ;;
+  stop) cmd_stop ;;
+  restart) cmd_stop >/dev/null; cmd_start ;;
+  probe) cmd_probe ;;
+  test) shift; cmd_test "$@" ;;
+  logs) shift; cmd_logs "$@" ;;
+  config) cmd_config ;;
+  save-override) shift; cmd_save_override "$@" ;;
+  *) die "usage: wacom-ctl {status|start|stop|restart|probe|test N|logs|config|save-override}" ;;
+esac

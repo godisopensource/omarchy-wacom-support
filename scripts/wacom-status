@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# Probe Wacom tablet presence (+ daemon state) as a single JSON object.
+# Used by BarWidget.qml polling; also handy for debugging.
+#   scripts/wacom-status --json
+set -u
+
+PLUGIN_ID="io.github.godisopensource.omarchy-wacom-support"
+RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}"
+PID_FILE="$RUNTIME_DIR/omarchy-wacom-support.pid"
+
+present=false
+name=""
+node=""
+
+# Fast path: kernel input devices (no dependency beyond /proc).
+while IFS= read -r block; do
+  : # placeholder (blocks handled below via awk-free parsing)
+done < /dev/null
+
+dev_name=""
+dev_node=""
+while IFS= read -r line; do
+  if [[ "$line" =~ ^N:\ Name=\"(.*)\"$ ]]; then
+    dev_name="${BASH_REMATCH[1]}"
+    dev_node=""
+  elif [[ "$line" =~ Handlers=(.*) ]]; then
+    handlers="${BASH_REMATCH[1]}"
+    for token in $handlers; do
+      if [[ "$token" == event* ]]; then
+        dev_node="/dev/input/$token"
+        break
+      fi
+    done
+    if [[ "$dev_name" == *Wacom* && "$dev_name" == *Pad* && -n "$dev_node" ]]; then
+      present=true
+      name="$dev_name"
+      node="$dev_node"
+      break
+    fi
+  elif [[ -z "$line" ]]; then
+    dev_name=""
+    dev_node=""
+  fi
+done < /proc/bus/input/devices
+
+# Fallback: libwacom listing (covers naming edge cases).
+if [[ "$present" != "true" ]] && command -v libwacom-list-local-devices >/dev/null 2>&1; then
+  if libwacom-list-local-devices 2>/dev/null | grep -qi "wacom"; then
+    present=true
+    name="$(libwacom-list-local-devices 2>/dev/null | grep -m1 -oP "name: '\K[^']+" || true)"
+    if [[ -z "$node" ]]; then
+      node="$(libwacom-list-local-devices 2>/dev/null | grep -m1 -oP "/dev/input/event\d+" || true)"
+    fi
+  fi
+fi
+
+daemon=false
+pid=0
+if [[ -f "$PID_FILE" ]]; then
+  pid="$(cat "$PID_FILE" 2>/dev/null || echo 0)"
+  if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+    daemon=true
+  else
+    pid=0
+  fi
+fi
+
+json_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  printf '%s' "$s"
+}
+
+printf '{"present": %s, "name": "%s", "node": "%s", "daemon": %s, "pid": %s}\n' \
+  "$present" "$(json_escape "$name")" "$(json_escape "$node")" "$daemon" "$pid"

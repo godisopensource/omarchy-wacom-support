@@ -94,10 +94,44 @@ Panel {
     return entry
   }
 
-  function save() {
-    var entry = collectEntry()
+  // Merge `values` over the current settings and persist immediately.
+  // Local copies are updated first (like the built-in clock panel) so a
+  // quick reopen reads fresh values instead of the pre-write shell.json
+  // state coming back asynchronously from the host.
+  function persistEntry(values) {
+    var entry = { id: moduleName }
+    var base = currentSettings()
+    for (var k in base) {
+      if (k !== "id") entry[k] = base[k]
+    }
+    for (var v in values) {
+      if (v !== "id") entry[v] = values[v]
+    }
+    root.settings = entry
+    if (hostWidget && "settings" in hostWidget) hostWidget.settings = entry
     if (root.bar && root.bar.shell && typeof root.bar.shell.updateEntryInline === "function") {
       root.bar.shell.updateEntryInline(moduleName, entry)
+      return true
+    }
+    return false
+  }
+
+  // The auto-start toggle persists on click (no Save needed). Previously
+  // it only flipped the in-memory editAutoStart, so reopening the panel
+  // reloaded the stored value and the toggle looked "automatically
+  // disabled"; a later Save could even write that stale value back.
+  function setAutoStart(next) {
+    editAutoStart = next === true
+    // Without a shell host there is nowhere to persist (the buttons.json
+    // override only feeds the daemon's button mapping), so it intentionally
+    // stays a session-only preference rather than risking a partial
+    // overwrite of the override file from not-yet-loaded delegates.
+    persistEntry({ autoStart: editAutoStart })
+  }
+
+  function save() {
+    var entry = collectEntry()
+    if (persistEntry(entry)) {
       savedNote = "Saved to bar settings — restarting daemon…"
     } else {
       // Detached/testing fallback: the daemon reads this override file first.
@@ -105,6 +139,7 @@ Panel {
       saveProc.running = true
       savedNote = "Saved to buttons.json override — restarting daemon…"
     }
+    editAutoStart = Model.autoStartOf(entry)
     Quickshell.execDetached(["bash", ctlPath, "restart"])
     refreshLater.restart()
   }
@@ -242,13 +277,13 @@ Panel {
           }
         }
 
-        Toggle {
-          width: parent.width
-          label: "Auto-start daemon"
-          description: "Launch the button daemon when a tablet is detected"
-          checked: root.editAutoStart
-          onClicked: root.editAutoStart = !root.editAutoStart
-        }
+          Toggle {
+            width: parent.width
+            label: "Auto-start daemon"
+            description: "Launch the button daemon when a tablet is detected"
+            checked: root.editAutoStart
+            onClicked: root.setAutoStart(!root.editAutoStart)
+          }
 
         Text {
           width: parent.width

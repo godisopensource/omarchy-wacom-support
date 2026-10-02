@@ -67,7 +67,9 @@ function isEmptyCommand(command) {
 
 function autoStartOf(settings) {
   var value = valueOf(settings, "autoStart", true);
-  return value === true || value === "true" || value === 1;
+  if (value === true || value === 1) return true;
+  var text = String(value).trim().toLowerCase();
+  return text === "true" || text === "1";
 }
 
 // Parse the JSON printed by scripts/wacom-status --json. Never throws;

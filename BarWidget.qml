@@ -27,8 +27,7 @@ BarWidget {
   readonly property string statusPath: pluginDir + "/scripts/wacom-status"
 
   function autoStartEnabled() {
-    var value = setting("autoStart", true)
-    return value === true || value === "true" || value === 1
+    return Model.autoStartOf({ autoStart: setting("autoStart", true) })
   }
 
   function tooltipText() {

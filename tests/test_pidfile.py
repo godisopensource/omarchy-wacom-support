@@ -308,6 +308,92 @@ def main():
             except OSError:
                 pass
 
+    # 9. Lifetime lock: a second foreground daemon in the same runtime
+    # dir refuses immediately, before opening any device.
+    runtime5 = tempfile.mkdtemp(prefix="wacom-runtime-lock-")
+    state5 = tempfile.mkdtemp(prefix="wacom-state-lock-")
+    first = None
+    try:
+        env5 = dict(
+            os.environ, XDG_RUNTIME_DIR=runtime5, XDG_STATE_HOME=state5
+        )
+        first = subprocess.Popen(
+            ["python3", os.path.join(REPO_ROOT, "scripts", "wacom-daemon.py")],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=env5,
+        )
+        pidfile5 = os.path.join(runtime5, "omarchy-wacom-support.pid")
+        for _ in range(100):
+            if os.path.exists(pidfile5):
+                break
+            time.sleep(0.1)
+        try:
+            with open(pidfile5, encoding="utf-8") as fh:
+                lock_pid = int(fh.read().strip().split()[0])
+        except (OSError, ValueError, IndexError):
+            lock_pid = None
+        check(
+            "first daemon owns pidfile under lock",
+            lock_pid == first.pid,
+            "pid=%r proc=%d" % (lock_pid, first.pid),
+        )
+        second = subprocess.run(
+            ["python3", os.path.join(REPO_ROOT, "scripts", "wacom-daemon.py")],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            env=env5,
+        )
+        check(
+            "second daemon refused while lock held",
+            second.returncode == 1
+            and "already running" in (second.stderr or ""),
+            "rc=%d err=%r" % (second.returncode, second.stderr),
+        )
+        check("first daemon survives refused double-start", first.poll() is None)
+    finally:
+        if first is not None and first.poll() is None:
+            first.terminate()
+            try:
+                first.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                first.kill()
+    check(
+        "pidfile cleaned after lock holder exits",
+        not os.path.exists(os.path.join(runtime5, "omarchy-wacom-support.pid")),
+    )
+
+    # 10. `wacom-ctl stop` sweeps stragglers running the same script path
+    # (duplicates from a concurrent-start race), not just the pidfile PID.
+    runtime6 = tempfile.mkdtemp(prefix="wacom-runtime-sweep-")
+    daemon_abs = os.path.join(REPO_ROOT, "scripts", "wacom-daemon.py")
+    stray = subprocess.Popen(
+        ["bash", "-c", 'exec -a "%s" sleep 30' % daemon_abs],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        time.sleep(0.3)
+        res = run_ctl("stop", runtime_dir=runtime6)
+        check(
+            "ctl stop sweeps same-script straggler",
+            stray.poll() is not None,
+            "stray still alive; out=%r" % (res.stdout,),
+        )
+        check(
+            "ctl stop reports swept duplicate",
+            "duplicate" in (res.stdout or ""),
+            "out=%r" % (res.stdout,),
+        )
+    finally:
+        if stray.poll() is None:
+            stray.terminate()
+            stray.wait()
+
     if FAILURES:
         print("FAIL: %d pidfile check(s) failed" % len(FAILURES))
         return 1

@@ -33,6 +33,11 @@ import subprocess
 import sys
 import time
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX platforms
+    fcntl = None
+
 PLUGIN_ID = "io.github.godisopensource.omarchy-wacom-support"
 EV_KEY = 0x01
 BTN_0 = 0x100
@@ -187,19 +192,90 @@ def try_remove_pidfile(path, expected_pid):
         pass
 
 
-def acquire_pidfile():
-    """Create our PID file exclusively; refuse when a live daemon exists.
+_lock_fd = None
+_lock_path = None
 
-    Returns the path on success, None when another live daemon owns the
-    slot (message already printed) or creation failed.
+
+def lock_file():
+    return os.path.join(resolve_runtime_dir(), "omarchy-wacom-support.lock")
+
+
+def acquire_daemon_lock():
+    """Take an exclusive flock held for the daemon's whole lifetime.
+
+    A PID file alone cannot serialize concurrent starters (both can pass
+    the "is anyone live?" check before either writes the file), which used
+    to leave two daemons listening on the same tablet — every button press
+    then fired twice. The flock is atomic: exactly one starter wins, the
+    loser exits before opening any device. Returns True on success.
     """
-    path = pid_file()
+    global _lock_fd, _lock_path
+    if fcntl is None:
+        log("flock unavailable, relying on pidfile checks only")
+        return True
+    path = lock_file()
+    if _lock_fd is not None and _lock_path == path:
+        try:
+            os.fstat(_lock_fd)
+            return True  # already held by this process
+        except OSError:
+            _lock_fd = None
+            _lock_path = None
+    release_daemon_lock()
     parent = os.path.dirname(path)
     try:
         os.makedirs(parent, mode=0o700, exist_ok=True)
     except OSError as exc:
         print("cannot create runtime dir %s: %s" % (parent, exc), file=sys.stderr)
+        return False
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    except OSError as exc:
+        print("cannot open lock file %s: %s" % (path, exc), file=sys.stderr)
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (BlockingIOError, OSError):
+        try:
+            existing = read_pidfile(pid_file())
+        except OSError:
+            existing = None
+        if existing is not None and is_live_daemon(existing):
+            print("daemon already running (pid %d)" % existing, file=sys.stderr)
+        else:
+            print("daemon already running (lock held)", file=sys.stderr)
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        return False
+    _lock_fd = fd  # kept open until process exit; never unlinked
+    _lock_path = path
+    return True
+
+
+def release_daemon_lock():
+    """Drop the lifetime lock (closing the fd releases the flock)."""
+    global _lock_fd, _lock_path
+    if _lock_fd is not None:
+        try:
+            os.close(_lock_fd)
+        except OSError:
+            pass
+        _lock_fd = None
+        _lock_path = None
+
+
+def acquire_pidfile():
+    """Take the lifetime lock, then create our PID file exclusively.
+
+    Returns the path on success, None when another live daemon owns the
+    slot (message already printed) or creation failed.
+    """
+    if not acquire_daemon_lock():
         return None
+    path = pid_file()
+    parent = os.path.dirname(path)
     # Never follow a symlink for the PID file (predictable-path hardening).
     try:
         if os.path.islink(path):
@@ -732,6 +808,7 @@ def main(argv=None):
         monitor(args.match, args.config)
     finally:
         release_pidfile(pidpath)
+        release_daemon_lock()
         log("daemon stopped")
     return 0
 

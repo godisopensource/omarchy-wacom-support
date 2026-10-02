@@ -44,6 +44,17 @@ const rows = Model.buttonRows({});
 if (rows.length !== 4 || rows[0].command.indexOf('hl.dsp.focus') === -1 || rows[0].command.indexOf('workspace = ') === -1) throw new Error('defaults');
 if (Model.parseStatus('nope').present !== false) throw new Error('parseStatus');
 if (!Model.presets().length) throw new Error('presets');
+// auto-start toggle: stored true must read back true in any serialization.
+for (const t of [true, 1, 'true', 'TRUE', '1', ' true ']) {
+  if (Model.autoStartOf({autoStart: t}) !== true) throw new Error('autoStart true for ' + JSON.stringify(t));
+}
+for (const f of [false, 0, 'false', 'FALSE', '0', '']) {
+  if (Model.autoStartOf({autoStart: f}) !== false) throw new Error('autoStart false for ' + JSON.stringify(f));
+}
+// Missing/null falls back to the enabled default.
+if (Model.autoStartOf({autoStart: null}) !== true) throw new Error('autoStart null default');
+if (Model.autoStartOf({autoStart: undefined}) !== true) throw new Error('autoStart undefined default');
+if (Model.autoStartOf({}) !== true) throw new Error('autoStart default');
 "; then ok "Model.js logic"; else bad "Model.js logic"; fi
 else
   echo "skip - node not installed (Model.js check)"

@@ -119,9 +119,15 @@ re-scan every 2 s, per-button 250 ms debounce. PID file in
 `$XDG_RUNTIME_DIR` (private `~/.local/run` fallback, never `/tmp`
 directly); `stop`/`restart`/`status` verify the PID is a live
 `wacom-daemon` via `/proc` before signalling, so a recycled PID is treated
-as stale instead of being killed. The daemon creates the PID file
-exclusively (`O_EXCL`/`O_NOFOLLOW`, symlink-safe) and only unlinks it when
-it still names its own PID. Log in `$XDG_STATE_HOME/omarchy-wacom-support/`.
+as stale instead of being killed. The daemon holds an exclusive `flock`
+for its whole lifetime so concurrent starters (e.g. one bar widget per
+monitor firing `start` at the same poll) can never leave two daemons
+listening on the same tablet and firing every button twice; a second
+instance exits immediately with "already running". `stop` additionally
+sweeps any leftover same-script stragglers by full script path. The PID
+file itself is created exclusively (`O_EXCL`/`O_NOFOLLOW`, symlink-safe)
+and only unlinked when it still names its own PID. Log in
+`$XDG_STATE_HOME/omarchy-wacom-support/`.
 
 ## Remove
 

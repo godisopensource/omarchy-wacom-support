@@ -145,7 +145,7 @@ cmd_start() {
 }
 
 cmd_stop() {
-  local pid raw
+  local pid raw stopped_msg="daemon stopped"
   if ! pid="$(daemon_pid)"; then
     raw="$(read_pidfile)"
     if [[ -n "$raw" ]] && is_our_daemon "$raw"; then
@@ -154,32 +154,103 @@ cmd_stop() {
     else
       if [[ -n "$raw" ]]; then
         safe_remove_pidfile "$raw"
-        echo "daemon not running (stale pid file cleaned)"
+        stopped_msg="daemon not running (stale pid file cleaned)"
       else
         rm -f "$PID_FILE" 2>/dev/null || true
-        echo "daemon not running"
+        stopped_msg="daemon not running"
       fi
+      pid=""
+    fi
+  fi
+  if [[ -n "$pid" ]]; then
+    # Re-verify identity immediately before signalling: the PID may have
+    # been recycled since daemon_pid() ran.
+    if ! is_our_daemon "$pid"; then
+      safe_remove_pidfile "$pid"
+      stopped_msg="daemon not running (stale pid file cleaned)"
+      pid=""
+    else
+      kill -TERM "$pid" 2>/dev/null || true
+      for _ in $(seq 1 20); do
+        is_our_daemon "$pid" || break
+        sleep 0.15
+      done
+      if is_our_daemon "$pid"; then
+        echo "daemon did not stop (pid $pid still running)" >&2
+        return 1
+      fi
+      safe_remove_pidfile "$pid"
+    fi
+  fi
+  local swept=0
+  swept="$(sweep_stragglers)"
+  if [[ "$swept" -gt 0 ]]; then
+    echo "$stopped_msg ($swept duplicate daemon(s) cleaned)"
+  else
+    echo "$stopped_msg"
+  fi
+}
+
+# Count live processes running this exact daemon script, excluding ourselves.
+# One-shot probes (`wacom-daemon.py --probe/--check-config/...`) share the
+# script path but carry flags; only the bare long-lived daemon counts.
+count_daemon_procs() {
+  [[ -d /proc ]] || { printf '0'; return 0; }
+  local n=0 proc pid cmd
+  for proc in /proc/[0-9]*/cmdline; do
+    pid="${proc#/proc/}"
+    pid="${pid%/cmdline}"
+    [[ "$pid" =~ ^[0-9]+$ ]] || continue
+    [[ "$pid" == "$$" ]] && continue
+    cmd="$(tr '\0' ' ' < "$proc" 2>/dev/null || echo "")"
+    [[ -n "$cmd" ]] || continue
+    case "$cmd" in
+      *"$DAEMON --"*) continue ;;
+      *"$DAEMON"*) n=$((n + 1)) ;;
+    esac
+  done
+  printf '%s' "$n"
+}
+
+# SIGTERM any live instance of this exact daemon script beyond the pidfile
+# one (e.g. duplicates from a concurrent-start race under an older version,
+# or a lost pidfile). Matching is by full script path in /proc cmdline —
+# never by bare PID — so recycled PIDs and unrelated processes are safe.
+# Prints the number of duplicate processes signalled.
+sweep_stragglers() {
+  [[ -d /proc ]] || { printf '0'; return 0; }
+  local proc pid cmd signalled=0
+  for proc in /proc/[0-9]*/cmdline; do
+    pid="${proc#/proc/}"
+    pid="${pid%/cmdline}"
+    [[ "$pid" =~ ^[0-9]+$ ]] || continue
+    [[ "$pid" == "$$" ]] && continue
+    cmd="$(tr '\0' ' ' < "$proc" 2>/dev/null || echo "")"
+    [[ -n "$cmd" ]] || continue
+    case "$cmd" in
+      *"$DAEMON --"*) continue ;; # one-shot probe, not the daemon
+      *"$DAEMON"*)
+        # kill -0 fails for other users' processes, so only our own
+        # instances are ever signalled.
+        if kill -0 "$pid" 2>/dev/null; then
+          kill -TERM "$pid" 2>/dev/null || true
+          signalled=$((signalled + 1))
+        fi
+        ;;
+    esac
+  done
+  if [[ "$signalled" -gt 0 ]]; then
+    for _ in $(seq 1 20); do
+      [[ "$(count_daemon_procs)" -eq 0 ]] && break
+      sleep 0.15
+    done
+    if [[ "$(count_daemon_procs)" -gt 0 ]]; then
+      echo "warning: $signalled duplicate daemon(s) signalled but still running" >&2
+      printf '0'
       return 0
     fi
   fi
-  # Re-verify identity immediately before signalling: the PID may have
-  # been recycled since daemon_pid() ran.
-  if ! is_our_daemon "$pid"; then
-    safe_remove_pidfile "$pid"
-    echo "daemon not running (stale pid file cleaned)"
-    return 0
-  fi
-  kill -TERM "$pid" 2>/dev/null || true
-  for _ in $(seq 1 20); do
-    is_our_daemon "$pid" || break
-    sleep 0.15
-  done
-  if is_our_daemon "$pid"; then
-    echo "daemon did not stop (pid $pid still running)" >&2
-    return 1
-  fi
-  safe_remove_pidfile "$pid"
-  echo "daemon stopped"
+  printf '%s' "$signalled"
 }
 
 cmd_probe() {

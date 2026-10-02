@@ -116,7 +116,12 @@ This file takes precedence over `shell.json` when present.
 Python, and on `EV_KEY` press of `BTN_0..BTN_3` spawns the mapped command
 detached (`start_new_session`). No exclusive grab, no root, hotplug
 re-scan every 2 s, per-button 250 ms debounce. PID file in
-`$XDG_RUNTIME_DIR`, log in `$XDG_STATE_HOME/omarchy-wacom-support/`.
+`$XDG_RUNTIME_DIR` (private `~/.local/run` fallback, never `/tmp`
+directly); `stop`/`restart`/`status` verify the PID is a live
+`wacom-daemon` via `/proc` before signalling, so a recycled PID is treated
+as stale instead of being killed. The daemon creates the PID file
+exclusively (`O_EXCL`/`O_NOFOLLOW`, symlink-safe) and only unlinks it when
+it still names its own PID. Log in `$XDG_STATE_HOME/omarchy-wacom-support/`.
 
 ## Remove
 

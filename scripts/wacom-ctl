@@ -7,16 +7,95 @@ PLUGIN_ID="io.github.godisopensource.omarchy-wacom-support"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DAEMON="$SCRIPT_DIR/wacom-daemon.py"
 STATUS="$SCRIPT_DIR/wacom-status"
-RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}"
+
+# Private per-user runtime dir. Never falls back to /tmp directly: a
+# world-writable predictable PID path would allow symlink/pre-create
+# games. XDG_RUNTIME_DIR (/run/user/$UID, 0700) is preferred.
+resolve_runtime_dir() {
+  if [[ -n "${XDG_RUNTIME_DIR:-}" && -d "${XDG_RUNTIME_DIR:-}" ]]; then
+    printf '%s' "$XDG_RUNTIME_DIR"
+    return
+  fi
+  local uid_dir="/run/user/$(id -u 2>/dev/null || echo 0)"
+  if [[ -d "$uid_dir" ]]; then
+    printf '%s' "$uid_dir"
+    return
+  fi
+  local fallback="${HOME:-/tmp}/.local/run"
+  mkdir -p "$fallback" 2>/dev/null || true
+  chmod 700 "$fallback" 2>/dev/null || true
+  printf '%s' "$fallback"
+}
+RUNTIME_DIR="$(resolve_runtime_dir)"
 PID_FILE="$RUNTIME_DIR/omarchy-wacom-support.pid"
+# Pre-hardening location (XDG_RUNTIME_DIR:-/tmp). Cleaned opportunistically
+# on start/stop so upgrades don't leave a stale file behind.
+LEGACY_PID_FILE="${XDG_RUNTIME_DIR:-/tmp}/omarchy-wacom-support.pid"
 
 die() { echo "wacom-ctl: $*" >&2; exit 1; }
+
+# True only when $1 is a LIVE instance of our daemon, not merely a live
+# PID. Closes the PID-reuse window: a recycled PID owned by us would pass
+# `kill -0` but fails the cmdline check and is treated as stale.
+is_our_daemon() {
+  local pid="${1:-}"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  [[ "$pid" -gt 1 ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  if [[ -r "/proc/$pid/cmdline" ]]; then
+    if tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -q "wacom-daemon"; then
+      return 0
+    fi
+    return 1
+  fi
+  if command -v ps >/dev/null 2>&1; then
+    ps -p "$pid" -o args= 2>/dev/null | grep -q "wacom-daemon" || return 1
+    return 0
+  fi
+  return 1
+}
+
+read_pidfile() {
+  local raw=""
+  raw="$(cat "$PID_FILE" 2>/dev/null || echo "")"
+  raw="${raw//[[:space:]]/}"
+  printf '%s' "$raw"
+}
+
+# Remove the pidfile only if it still holds $1. Prevents deleting a fresh
+# daemon's file in a stop/start race.
+safe_remove_pidfile() {
+  local expected="${1:-}"
+  [[ -n "$expected" ]] || return 0
+  local current=""
+  current="$(read_pidfile)"
+  if [[ "$current" == "$expected" ]]; then
+    rm -f "$PID_FILE"
+  fi
+  if [[ "$LEGACY_PID_FILE" != "$PID_FILE" ]]; then
+    rm -f "$LEGACY_PID_FILE" 2>/dev/null || true
+  fi
+}
+
+clean_stale_pidfile() {
+  if [[ -f "$PID_FILE" ]]; then
+    local raw=""
+    raw="$(read_pidfile)"
+    if [[ -z "$raw" ]]; then
+      rm -f "$PID_FILE"
+      return 0
+    fi
+    if ! is_our_daemon "$raw"; then
+      safe_remove_pidfile "$raw"
+    fi
+  fi
+}
 
 daemon_pid() {
   if [[ -f "$PID_FILE" ]]; then
     local pid
-    pid="$(cat "$PID_FILE" 2>/dev/null || echo "")"
-    if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+    pid="$(read_pidfile)"
+    if [[ -n "$pid" ]] && is_our_daemon "$pid"; then
       printf '%s' "$pid"
       return 0
     fi
@@ -46,6 +125,11 @@ cmd_start() {
     echo "daemon already running (pid $(daemon_pid))"
     return 0
   fi
+  clean_stale_pidfile
+  if daemon_pid >/dev/null; then
+    echo "daemon already running (pid $(daemon_pid))"
+    return 0
+  fi
   [[ -x "$DAEMON" ]] || chmod +x "$DAEMON" 2>/dev/null || true
   # setsid + nohup so it survives the launching shell/widget process.
   setsid nohup python3 "$DAEMON" >/dev/null 2>&1 < /dev/null &
@@ -61,18 +145,40 @@ cmd_start() {
 }
 
 cmd_stop() {
-  local pid
+  local pid raw
   if ! pid="$(daemon_pid)"; then
-    rm -f "$PID_FILE"
-    echo "daemon not running"
+    raw="$(read_pidfile)"
+    if [[ -n "$raw" ]] && is_our_daemon "$raw"; then
+      # Raced with a fresh start between the checks: stop it below.
+      pid="$raw"
+    else
+      if [[ -n "$raw" ]]; then
+        safe_remove_pidfile "$raw"
+        echo "daemon not running (stale pid file cleaned)"
+      else
+        rm -f "$PID_FILE" 2>/dev/null || true
+        echo "daemon not running"
+      fi
+      return 0
+    fi
+  fi
+  # Re-verify identity immediately before signalling: the PID may have
+  # been recycled since daemon_pid() ran.
+  if ! is_our_daemon "$pid"; then
+    safe_remove_pidfile "$pid"
+    echo "daemon not running (stale pid file cleaned)"
     return 0
   fi
-  kill "$pid" 2>/dev/null || true
+  kill -TERM "$pid" 2>/dev/null || true
   for _ in $(seq 1 20); do
-    kill -0 "$pid" 2>/dev/null || break
+    is_our_daemon "$pid" || break
     sleep 0.15
   done
-  rm -f "$PID_FILE"
+  if is_our_daemon "$pid"; then
+    echo "daemon did not stop (pid $pid still running)" >&2
+    return 1
+  fi
+  safe_remove_pidfile "$pid"
   echo "daemon stopped"
 }
 
@@ -135,7 +241,7 @@ case "${1:-status}" in
   status) shift; cmd_status "$@" ;;
   start) cmd_start ;;
   stop) cmd_stop ;;
-  restart) cmd_stop >/dev/null; cmd_start ;;
+  restart) cmd_stop >/dev/null || true; cmd_start ;;
   probe) cmd_probe ;;
   test) shift; cmd_test "$@" ;;
   logs) shift; cmd_logs "$@" ;;

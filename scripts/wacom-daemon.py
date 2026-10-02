@@ -69,8 +69,221 @@ def state_dir():
 
 
 def pid_file():
+    return os.path.join(resolve_runtime_dir(), "omarchy-wacom-support.pid")
+
+
+def legacy_pid_file():
+    """Pre-hardening location (XDG_RUNTIME_DIR with /tmp fallback)."""
     runtime = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
     return os.path.join(runtime, "omarchy-wacom-support.pid")
+
+
+def resolve_runtime_dir():
+    """Private per-user runtime dir; never /tmp directly.
+
+    XDG_RUNTIME_DIR (/run/user/$UID, 0700) is preferred so the predictable
+    PID filename cannot be pre-created or symlinked by another user.
+    """
+    xdg = os.environ.get("XDG_RUNTIME_DIR")
+    if xdg and os.path.isdir(xdg):
+        return xdg
+    try:
+        uid = os.getuid()
+    except AttributeError:
+        uid = None
+    if uid is not None:
+        cand = "/run/user/%d" % uid
+        if os.path.isdir(cand):
+            return cand
+    fallback = os.path.join(home(), ".local", "run")
+    try:
+        os.makedirs(fallback, mode=0o700, exist_ok=True)
+        try:
+            os.chmod(fallback, 0o700)
+        except OSError:
+            pass
+    except OSError:
+        pass
+    return fallback
+
+
+def read_pidfile(path):
+    """Return the PID int stored in *path*, or None when missing/invalid."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            text = fh.read().strip().split()
+    except OSError:
+        return None
+    if not text:
+        return None
+    token = text[0]
+    if not token.isdigit():
+        return None
+    try:
+        pid = int(token)
+    except ValueError:
+        return None
+    return pid if pid > 1 else None
+
+
+def _cmdline_has_daemon(pid):
+    """None when /proc is unavailable, else True/False for our argv marker."""
+    try:
+        with open("/proc/%d/cmdline" % pid, "rb") as fh:
+            data = fh.read()
+    except OSError:
+        return None
+    return b"wacom-daemon" in data
+
+
+def is_live_daemon(pid):
+    """True only when *pid* is a live instance of this daemon.
+
+    A bare kill(pid, 0) check is not enough: after an unclean exit the PID
+    may be recycled by an unrelated process owned by the same user.
+    """
+    try:
+        pid_int = int(str(pid).strip())
+    except (ValueError, TypeError, AttributeError):
+        return False
+    if pid_int <= 1:
+        return False
+    try:
+        os.kill(pid_int, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Exists but belongs to another user (or LSM denial): not ours.
+        # Fall through to the cmdline check which will confirm/refute.
+        pass
+    except OSError:
+        return False
+    marker = _cmdline_has_daemon(pid_int)
+    if marker is None:
+        try:
+            out = subprocess.run(
+                ["ps", "-p", str(pid_int), "-o", "args="],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            return "wacom-daemon" in (out.stdout or "")
+        except (OSError, ValueError):
+            return False
+    return bool(marker)
+
+
+def try_remove_pidfile(path, expected_pid):
+    """Unlink *path* only if it still contains *expected_pid*."""
+    try:
+        current = read_pidfile(path)
+    except OSError:
+        return
+    if current != expected_pid:
+        return
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+def acquire_pidfile():
+    """Create our PID file exclusively; refuse when a live daemon exists.
+
+    Returns the path on success, None when another live daemon owns the
+    slot (message already printed) or creation failed.
+    """
+    path = pid_file()
+    parent = os.path.dirname(path)
+    try:
+        os.makedirs(parent, mode=0o700, exist_ok=True)
+    except OSError as exc:
+        print("cannot create runtime dir %s: %s" % (parent, exc), file=sys.stderr)
+        return None
+    # Never follow a symlink for the PID file (predictable-path hardening).
+    try:
+        if os.path.islink(path):
+            os.unlink(path)
+            log("removed symlink pid file %s" % path)
+    except OSError:
+        pass
+    # Refuse double-start, including a previous-version daemon that used
+    # the legacy /tmp fallback path.
+    for cand in dict.fromkeys([path, legacy_pid_file()]):
+        try:
+            existing = read_pidfile(cand)
+        except OSError:
+            existing = None
+        if existing is not None and is_live_daemon(existing):
+            print("daemon already running (pid %d)" % existing, file=sys.stderr)
+            return None
+    # Drop our own stale file, if any.
+    try:
+        stale = read_pidfile(path)
+    except OSError:
+        stale = None
+    if stale is not None and not is_live_daemon(stale):
+        try_remove_pidfile(path, stale)
+    # Opportunistic legacy cleanup after upgrades.
+    leg = legacy_pid_file()
+    if leg != path:
+        try:
+            leg_pid = read_pidfile(leg)
+        except OSError:
+            leg_pid = None
+        if leg_pid is not None and not is_live_daemon(leg_pid):
+            try_remove_pidfile(leg, leg_pid)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if nofollow:
+        flags |= nofollow
+    try:
+        fd = os.open(path, flags, 0o644)
+    except FileExistsError:
+        # Raced with another starter: whoever owns a live daemon wins.
+        try:
+            rival = read_pidfile(path)
+        except OSError:
+            rival = None
+        if rival is not None and is_live_daemon(rival):
+            print("daemon already running (pid %d)" % rival, file=sys.stderr)
+            return None
+        if rival is not None:
+            try_remove_pidfile(path, rival)
+        try:
+            fd = os.open(path, flags, 0o644)
+        except OSError as exc:
+            print("cannot write pid file %s: %s" % (path, exc), file=sys.stderr)
+            return None
+    except OSError as exc:
+        print("cannot write pid file %s: %s" % (path, exc), file=sys.stderr)
+        return None
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(str(os.getpid()))
+    except OSError as exc:
+        print("cannot write pid file %s: %s" % (path, exc), file=sys.stderr)
+        try:
+            try_remove_pidfile(path, os.getpid())
+        except OSError:
+            pass
+        return None
+    return path
+
+
+def release_pidfile(path):
+    """Remove our PID file, but only if it still names our own PID."""
+    if not path:
+        return
+    try:
+        current = read_pidfile(path)
+    except OSError:
+        return
+    if current == os.getpid():
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
 
 
 def log_file():
@@ -335,18 +548,6 @@ def serve_opened(fds, get_config, last_press):
                 del fds[fileno]
                 break
     return bool(fds)
-    log("button %d -> %s" % (index, cmd))
-    try:
-        subprocess.Popen(
-            ["sh", "-c", cmd],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-            env=dict(os.environ),
-        )
-    except OSError as exc:
-        log("button %d failed to spawn: %s" % (index, exc))
 
 
 def eviocgbit_key_codes(node, lo=BTN_0, hi=BTN_0 + 15):
@@ -523,21 +724,14 @@ def main(argv=None):
     signal.signal(signal.SIGHUP, lambda s, f: log("SIGHUP: config re-read on next press"))
     signal.signal(signal.SIGINT, on_signal)
 
-    pidpath = pid_file()
-    try:
-        with open(pidpath, "w", encoding="utf-8") as fh:
-            fh.write(str(os.getpid()))
-    except OSError as exc:
-        print("cannot write pid file %s: %s" % (pidpath, exc), file=sys.stderr)
+    pidpath = acquire_pidfile()
+    if pidpath is None:
         return 1
     log("daemon started (pid %d)" % os.getpid())
     try:
         monitor(args.match, args.config)
     finally:
-        try:
-            os.unlink(pidpath)
-        except OSError:
-            pass
+        release_pidfile(pidpath)
         log("daemon stopped")
     return 0
 

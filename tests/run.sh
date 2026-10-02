@@ -77,6 +77,13 @@ else
   bad "legacy translation"
 fi
 
+# 7d. pidfile hardening: recycled PIDs are never signalled (no hardware).
+if python3 tests/test_pidfile.py; then
+  : # test prints its own ok lines
+else
+  bad "pidfile hardening"
+fi
+
 # 8. pad detection (live; informational when no tablet).
 if python3 scripts/wacom-daemon.py --probe >/dev/null 2>&1; then
   ok "daemon --probe (pad found)"

@@ -22,6 +22,14 @@ BarWidget {
   property int daemonPid: 0
   property bool probed: false
 
+  // The host injects `settings` asynchronously after creation
+  // (callLater in the bar slot). Until the first injection, setting()
+  // returns fallbacks — which would read autoStart as enabled even when
+  // the user stored false. Never auto-start on guessed defaults: a stale
+  // "running" assumption self-heals, but a spurious `start` used to fork a
+  // second daemon (one per monitor) that fired every button twice.
+  property bool settingsSeen: false
+
   readonly property string pluginDir: Quickshell.env("HOME") + "/.config/omarchy/plugins/" + moduleName
   readonly property string ctlPath: pluginDir + "/scripts/wacom-ctl"
   readonly property string statusPath: pluginDir + "/scripts/wacom-status"
@@ -51,7 +59,7 @@ BarWidget {
     daemonRunning = status.daemon
     daemonPid = status.pid
     probed = true
-    if (tabletPresent && !daemonRunning && autoStartEnabled())
+    if (tabletPresent && !daemonRunning && settingsSeen && autoStartEnabled())
       Quickshell.execDetached(["bash", ctlPath, "start"])
   }
 
@@ -90,7 +98,10 @@ BarWidget {
   implicitHeight: tabletPresent ? button.implicitHeight : 0
 
   onBarChanged: injectPanel()
-  onSettingsChanged: injectPanel()
+  onSettingsChanged: {
+    settingsSeen = true
+    injectPanel()
+  }
 
   Component.onCompleted: refresh()
 
